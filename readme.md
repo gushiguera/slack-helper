@@ -7,6 +7,7 @@ Slack Helper is a Slack-integrated automation tool designed to streamline task m
 - **Slack Integration**: React to Slack messages with a specific emoji to trigger ticket creation.
 - **JIRA Integration**: Automatically create and manage JIRA tickets, including closing tickets with a reaction.
 - **Google Gemini**: Leverages Google Gemini for generating ticket titles and descriptions.
+- **Thread Assistant**: `@`-mention the bot in a thread to ask a question. It replies with Gemini and remembers the thread conversation so follow-up questions have continuity.
 - **Configurable Environments**: Supports separate configurations for development and production.
 
 ---
@@ -20,6 +21,9 @@ Slack Helper is a Slack-integrated automation tool designed to streamline task m
    - `chat:write`
    - `reactions:write`
    - `channels:history`
+   - `app_mentions:read` (for the Thread Assistant)
+
+   Also enable the `app_mention` event subscription so the bot receives `@`-mentions.
 3. **JIRA API**: Ensure you have a JIRA account with API access.
 4. **Google Gemini API**: Obtain an API key for Google Gemini.
 
@@ -73,6 +77,12 @@ Slack Helper is a Slack-integrated automation tool designed to streamline task m
 
 3. **Close a Ticket**:
    - React to a Slack message with the `:white_check_mark:` emoji to close the associated JIRA ticket.
+
+4. **Ask in a Thread**:
+   - `@`-mention the bot in a thread to ask a question. It replies in-thread and remembers
+     the conversation for follow-ups.
+   - Memory is **in-memory only** and is reset when the bot restarts. Messages posted in a
+     thread *between* mentions are not captured until the next time the bot is mentioned.
 
 ---
 

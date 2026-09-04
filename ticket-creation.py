@@ -7,10 +7,11 @@ from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 from langgraph.graph import StateGraph, END
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from requests.auth import HTTPBasicAuth
 from dotenv import load_dotenv
 from slack_sdk import WebClient
+from memory import ThreadMemory
 
 # Determine the configuration mode (default to "dev")
 config_mode = os.environ.get("CONFIG_MODE", "dev")
@@ -77,6 +78,11 @@ def load_prompts(file_path):
 PROMPTS = load_prompts("prompts.txt")
 SLACK_HELPER_SYSTEM_PROMPT = PROMPTS["slack_helper_system_prompt"]
 SLACK_HELPER_SOCK_SYSTEM_PROMPT = PROMPTS["slack_helper_sock_system_prompt"]
+SLACK_HELPER_ASSISTANT_SYSTEM_PROMPT = PROMPTS["slack_helper_assistant_system_prompt"]
+
+# In-memory, per-thread conversation store for @-mention follow-ups.
+# Lost on restart by design (see memory.py).
+THREAD_MEMORY = ThreadMemory()
 
 def create_jira_title(message_text):
     """Generates a JIRA ticket title using Gemini."""
@@ -536,6 +542,64 @@ def extract_issue_key_from_message(event):
 
     # Return None if no ticket key is found
     return None
+
+def strip_bot_mention(text):
+    """Removes Slack <@USERID> mention tokens from a message's text."""
+    import re
+    return re.sub(r"<@[A-Z0-9]+>", "", text or "").strip()
+
+def fetch_thread_turns(channel_id, thread_ts, exclude_ts):
+    """Fetches prior thread messages as memory turns, skipping the triggering message."""
+    turns = []
+    try:
+        response = app.client.conversations_replies(channel=channel_id, ts=thread_ts)
+    except Exception as e:
+        print(f"Could not fetch thread {thread_ts} for seeding: {e}")
+        return turns
+
+    for message in response.get("messages", []):
+        if message.get("ts") == exclude_ts:
+            continue
+        text = strip_bot_mention(message.get("text", ""))
+        if not text:
+            continue
+        # The bot's own posts come back with a bot_id; treat those as assistant turns.
+        role = "assistant" if message.get("bot_id") else "user"
+        turns.append({"role": role, "text": text})
+    return turns
+
+def generate_assistant_reply(history):
+    """Generates a thread reply from remembered conversation history using Gemini."""
+    messages = [SystemMessage(content=SLACK_HELPER_ASSISTANT_SYSTEM_PROMPT)]
+    for turn in history:
+        if turn["role"] == "assistant":
+            messages.append(AIMessage(content=turn["text"]))
+        else:
+            messages.append(HumanMessage(content=turn["text"]))
+    response = GEMINI_MODEL.invoke(messages)
+    return response.content.strip()
+
+@app.event("app_mention")
+def handle_app_mention(event, say):
+    """Replies when Slack Helper is @-mentioned, remembering the thread conversation."""
+    channel_id = event["channel"]
+    # Reply inside the thread; if the mention is a top-level message, anchor a thread on it.
+    thread_ts = event.get("thread_ts", event["ts"])
+    key = f"{channel_id}:{thread_ts}"
+
+    user_text = strip_bot_mention(event.get("text", ""))
+
+    try:
+        # On first contact with a thread, seed memory from its existing messages.
+        if not THREAD_MEMORY.has(key):
+            THREAD_MEMORY.seed(key, fetch_thread_turns(channel_id, thread_ts, event["ts"]))
+
+        THREAD_MEMORY.add(key, "user", user_text)
+        reply = generate_assistant_reply(THREAD_MEMORY.history(key))
+        THREAD_MEMORY.add(key, "assistant", reply)
+        slack_reply(channel_id, thread_ts, reply)
+    except Exception as e:
+        print(f"Error handling app_mention in thread {thread_ts}: {e}")
 
 if __name__ == "__main__":
     SocketModeHandler(app, SLACK_APP_TOKEN).start()
